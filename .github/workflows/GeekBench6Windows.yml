@@ -14,36 +14,248 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
       
+      - name: Environment information
+        run: |
+          Write-Host "======== Environment Information ========"
+          Write-Host "PowerShell Version: $($PSVersionTable.PSVersion)"
+          Write-Host "Windows Version: $(cmd /c ver)"
+          Write-Host "Current Directory: $(Get-Location)"
+          Write-Host "Current User: $(whoami)"
+          Write-Host "Available disk space:"
+          Get-PSDrive -PSProvider FileSystem | Format-Table -Property Name, Used, Free
+          Write-Host "========================================"
+        shell: pwsh
+      
       - name: Create results directory
-        run: mkdir -p results
+        run: |
+          Write-Host "Creating results directory..."
+          $resultsDir = "$(Get-Location)\results"
+          
+          if (Test-Path $resultsDir) {
+            Write-Host "Results directory already exists at: $resultsDir"
+          } else {
+            New-Item -Path $resultsDir -ItemType Directory -Force
+            Write-Host "Results directory created at: $resultsDir"
+          }
+          
+          # Verify directory exists
+          if (Test-Path $resultsDir) {
+            Write-Host "✓ Results directory confirmed at: $resultsDir"
+          } else {
+            Write-Error "❌ Failed to create results directory!"
+            exit 1
+          }
         shell: pwsh
       
       - name: Download Geekbench 6
         run: |
-          Invoke-WebRequest -Uri "https://cdn.geekbench.com/Geekbench-6.2.1-WindowsSetup.exe" -OutFile "gb6_setup.exe"
+          Write-Host "Downloading Geekbench 6..."
+          $downloadUrl = "https://cdn.geekbench.com/Geekbench-6.2.1-WindowsSetup.exe"
+          $setupFile = "$(Get-Location)\gb6_setup.exe"
+          
+          Write-Host "Download URL: $downloadUrl"
+          Write-Host "Target file: $setupFile"
+          
+          try {
+            Invoke-WebRequest -Uri $downloadUrl -OutFile $setupFile -UseBasicParsing -Verbose
+            Write-Host "Download completed successfully."
+          } catch {
+            Write-Error "❌ Failed to download Geekbench 6: $_"
+            exit 1
+          }
+          
+          # Verify download
+          if (Test-Path $setupFile) {
+            $fileSize = (Get-Item $setupFile).Length / 1MB
+            Write-Host "✓ Downloaded file verified. Size: $([math]::Round($fileSize, 2)) MB"
+          } else {
+            Write-Error "❌ Download verification failed - setup file not found!"
+            exit 1
+          }
         shell: pwsh
       
       - name: Install Geekbench 6
         run: |
-          Start-Process -FilePath ".\gb6_setup.exe" -ArgumentList "/S" -Wait
+          Write-Host "Installing Geekbench 6..."
+          $setupFile = "$(Get-Location)\gb6_setup.exe"
+          
+          # Verify installer exists
+          if (-Not (Test-Path $setupFile)) {
+            Write-Error "❌ Geekbench 6 installer not found at: $setupFile"
+            exit 1
+          }
+          
+          Write-Host "Running installer silently with /S flag..."
+          try {
+            $process = Start-Process -FilePath $setupFile -ArgumentList "/S" -Wait -PassThru -Verbose
+            Write-Host "Installation process completed with exit code: $($process.ExitCode)"
+          } catch {
+            Write-Error "❌ Installation failed: $_"
+            exit 1
+          }
+          
+          # Check common installation paths
+          $possiblePaths = @(
+            "C:\Program Files\Geekbench 6\geekbench6.exe",
+            "C:\Program Files (x86)\Geekbench 6\geekbench6.exe",
+            "${env:ProgramFiles}\Geekbench 6\geekbench6.exe",
+            "${env:ProgramFiles(x86)}\Geekbench 6\geekbench6.exe",
+            "${env:LOCALAPPDATA}\Programs\Geekbench 6\geekbench6.exe"
+          )
+          
+          Write-Host "Checking for Geekbench 6 executable in possible installation paths..."
+          $foundPaths = @()
+          
+          foreach ($path in $possiblePaths) {
+            if (Test-Path $path) {
+              Write-Host "✓ Found at: $path"
+              $foundPaths += $path
+            } else {
+              Write-Host "✗ Not found at: $path"
+            }
+          }
+          
+          # Search for Geekbench in Program Files if not found
+          if ($foundPaths.Count -eq 0) {
+            Write-Host "Searching for Geekbench 6 in Program Files directories..."
+            $searchDirs = @(
+              "C:\Program Files",
+              "C:\Program Files (x86)"
+            )
+            
+            foreach ($dir in $searchDirs) {
+              if (Test-Path $dir) {
+                Write-Host "Searching in $dir..."
+                $found = Get-ChildItem -Path $dir -Recurse -Filter "geekbench*.exe" -ErrorAction SilentlyContinue | Select-Object -First 5
+                foreach ($item in $found) {
+                  Write-Host "Found: $($item.FullName)"
+                  $foundPaths += $item.FullName
+                }
+              }
+            }
+          }
+          
+          # Set the installation state for next steps
+          if ($foundPaths.Count -gt 0) {
+            Write-Host "✓ Geekbench executable found in $($foundPaths.Count) location(s)"
+            $foundPaths | ForEach-Object { Write-Host "  - $_" }
+            
+            # Create a file with the found path to use in next step
+            $foundPaths[0] | Out-File -FilePath ".\geekbench_path.txt"
+            Write-Host "✓ Installation verified."
+          } else {
+            Write-Error "❌ Geekbench executable not found in any expected location after installation!"
+            
+            # List all installed programs for debugging
+            Write-Host "Listing all installed programs for debugging..."
+            Get-ItemProperty HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\* | 
+              Where-Object { $_.DisplayName -like "*Geekbench*" } | 
+              Select-Object DisplayName, DisplayVersion, InstallLocation, InstallDate |
+              Format-Table -AutoSize
+              
+            exit 1
+          }
         shell: pwsh
       
       - name: Run Geekbench 6 benchmark
         run: |
-          # Default install location for Geekbench 6
-          $GB_PATH = "C:\Program Files\Geekbench 6\geekbench6.exe"
+          Write-Host "Running Geekbench 6 benchmark..."
+          
+          # Read Geekbench path from file created in previous step
+          if (Test-Path ".\geekbench_path.txt") {
+            $GB_PATH = Get-Content ".\geekbench_path.txt" -Raw
+            $GB_PATH = $GB_PATH.Trim()
+            Write-Host "Using Geekbench path from file: $GB_PATH"
+          } else {
+            # Default paths if file not found
+            $possiblePaths = @(
+              "C:\Program Files\Geekbench 6\geekbench6.exe",
+              "C:\Program Files (x86)\Geekbench 6\geekbench6.exe",
+              "${env:ProgramFiles}\Geekbench 6\geekbench6.exe",
+              "${env:ProgramFiles(x86)}\Geekbench 6\geekbench6.exe",
+              "${env:LOCALAPPDATA}\Programs\Geekbench 6\geekbench6.exe"
+            )
+            
+            $GB_PATH = $null
+            foreach ($path in $possiblePaths) {
+              if (Test-Path $path) {
+                $GB_PATH = $path
+                Write-Host "Found Geekbench at: $GB_PATH"
+                break
+              }
+            }
+            
+            if (-Not $GB_PATH) {
+              Write-Error "❌ Geekbench 6 executable not found at any expected location"
+              
+              # Search for anything that might be Geekbench
+              Write-Host "Searching for any file that might be Geekbench..."
+              $searchDirs = @(
+                "C:\Program Files",
+                "C:\Program Files (x86)",
+                $env:LOCALAPPDATA
+              )
+              
+              foreach ($dir in $searchDirs) {
+                if (Test-Path $dir) {
+                  $found = Get-ChildItem -Path $dir -Recurse -Filter "geek*.exe" -ErrorAction SilentlyContinue | Select-Object -First 5
+                  foreach ($item in $found) {
+                    Write-Host "Found: $($item.FullName)"
+                    $GB_PATH = $item.FullName
+                  }
+                }
+              }
+              
+              if (-Not $GB_PATH) {
+                exit 1
+              }
+            }
+          }
+          
+          # Create results directory if it doesn't exist
+          $resultsDir = "$(Get-Location)\results"
+          if (-Not (Test-Path $resultsDir)) {
+            New-Item -Path $resultsDir -ItemType Directory -Force
+            Write-Host "Created results directory: $resultsDir"
+          }
+          
+          $resultsFile = "$resultsDir\geekbench_results.txt"
           
           # Verify Geekbench executable exists
           if (-Not (Test-Path $GB_PATH)) {
-            Write-Error "Geekbench 6 executable not found at expected location"
+            Write-Error "❌ Geekbench 6 executable not found at: $GB_PATH"
             exit 1
           }
           
-          # Run benchmark with CLI options
-          & $GB_PATH --no-upload --export-text "results\geekbench_results.txt"
+          # Get Geekbench file information
+          $fileInfo = Get-Item $GB_PATH
+          Write-Host "Geekbench file details:"
+          Write-Host "  - Path: $($fileInfo.FullName)"
+          Write-Host "  - Size: $([math]::Round($fileInfo.Length / 1MB, 2)) MB"
+          Write-Host "  - Created: $($fileInfo.CreationTime)"
+          Write-Host "  - Directory contents:"
+          Get-ChildItem -Path $fileInfo.Directory | Format-Table Name, Length, LastWriteTime
           
-          # Display results summary
-          Get-Content "results\geekbench_results.txt"
+          # Run benchmark with CLI options
+          Write-Host "Starting benchmark with command: $GB_PATH --no-upload --export-text $resultsFile"
+          try {
+            $benchmarkProcess = Start-Process -FilePath $GB_PATH -ArgumentList "--no-upload", "--export-text", "$resultsFile" -Wait -PassThru -NoNewWindow
+            $exitCode = $benchmarkProcess.ExitCode
+            Write-Host "Benchmark process completed with exit code: $exitCode"
+          } catch {
+            Write-Error "❌ Failed to run benchmark: $_"
+            exit 1
+          }
+          
+          # Check if results file was created
+          if (Test-Path $resultsFile) {
+            Write-Host "✓ Results file created successfully"
+            Write-Host "Results summary:"
+            Get-Content $resultsFile
+          } else {
+            Write-Error "❌ Results file not created at: $resultsFile"
+            exit 1
+          }
         shell: pwsh
       
       - name: Upload benchmark results
@@ -52,3 +264,4 @@ jobs:
           name: geekbench-results
           path: results/
           retention-days: 90
+        if: always()  # Try to upload even if previous steps failed
