@@ -1,0 +1,54 @@
+name: Geekbench 6 Benchmark Test
+
+on:
+  workflow_dispatch:  # Allows manual triggering
+  schedule:
+    - cron: '0 0 * * 0'  # Runs weekly on Sunday at midnight UTC
+
+jobs:
+  benchmark:
+    name: Run Geekbench 6 on Windows
+    runs-on: windows-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Create results directory
+        run: mkdir -p results
+        shell: pwsh
+      
+      - name: Download Geekbench 6
+        run: |
+          Invoke-WebRequest -Uri "https://cdn.geekbench.com/Geekbench-6.2.1-WindowsSetup.exe" -OutFile "gb6_setup.exe"
+        shell: pwsh
+      
+      - name: Install Geekbench 6
+        run: |
+          Start-Process -FilePath ".\gb6_setup.exe" -ArgumentList "/S" -Wait
+        shell: pwsh
+      
+      - name: Run Geekbench 6 benchmark
+        run: |
+          # Default install location for Geekbench 6
+          $GB_PATH = "C:\Program Files\Geekbench 6\geekbench6.exe"
+          
+          # Verify Geekbench executable exists
+          if (-Not (Test-Path $GB_PATH)) {
+            Write-Error "Geekbench 6 executable not found at expected location"
+            exit 1
+          }
+          
+          # Run benchmark with CLI options
+          & $GB_PATH --no-upload --export-text "results\geekbench_results.txt"
+          
+          # Display results summary
+          Get-Content "results\geekbench_results.txt"
+        shell: pwsh
+      
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: geekbench-results
+          path: results/
+          retention-days: 90
